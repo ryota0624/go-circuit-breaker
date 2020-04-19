@@ -1,6 +1,7 @@
 package circuit_breaker
 
 import (
+	"golang.org/x/xerrors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -8,7 +9,7 @@ import (
 
 type (
 	state interface {
-		Failed(breaker mutableCircuitBreaker)
+		Failed(breaker innerCircuitBreaker)
 	}
 
 	stateOpen     struct{}
@@ -16,17 +17,16 @@ type (
 	stateClosed   struct{}
 
 	CircuitBreaker interface {
-		IsThresholdExceeded() bool
 		FailureCount() uint64
 		FailureCountResetTimeout() time.Duration
-		IsOpen() bool
-		IsClosed() bool
-		NotifyFailure()
-		NotifySuccess()
+		InvokeFunc(func() error) error
 	}
 
-	mutableCircuitBreaker interface {
+	innerCircuitBreaker interface {
 		CircuitBreaker
+		IsThresholdExceeded() bool
+		IsOpen() bool
+		IsClosed() bool
 		Open()
 		IncrementFailureCount()
 		DecrementFailureCount()
@@ -42,6 +42,8 @@ type (
 		failureCountResetTimeout time.Duration
 	}
 )
+
+var ErrCircuitBreakerOpen = xerrors.New("circuit breaker is open. canceled invoke function")
 
 func NewCircuitBreaker(
 	threshold uint64,
@@ -64,7 +66,7 @@ var (
 	Closed   = stateClosed{}
 )
 
-func (s stateClosed) Failed(breaker mutableCircuitBreaker) {
+func (s stateClosed) Failed(breaker innerCircuitBreaker) {
 	breaker.IncrementFailureCount()
 	if breaker.IsThresholdExceeded() {
 		breaker.Open()
@@ -78,12 +80,25 @@ func (s stateClosed) Failed(breaker mutableCircuitBreaker) {
 	}()
 }
 
-func (s stateHalfOpen) Failed(breaker mutableCircuitBreaker) {
+func (s stateHalfOpen) Failed(breaker innerCircuitBreaker) {
 	breaker.Open()
 }
 
-func (s stateOpen) Failed(breaker mutableCircuitBreaker) {
+func (s stateOpen) Failed(breaker innerCircuitBreaker) {
 	// DO NOT Nothing. if this method was called, the Circuit Breaker has a bug
+}
+
+func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {
+	if c.IsOpen() {
+		return ErrCircuitBreakerOpen
+	}
+	result := f()
+	if result != nil {
+		c.NotifyFailure()
+		return result
+	}
+	c.NotifySuccess()
+	return nil
 }
 
 func (c *CircuitBreakerImpl) IncrementFailureCount() {

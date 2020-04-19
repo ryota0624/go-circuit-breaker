@@ -19,7 +19,6 @@ func SuccessFunc() error {
 func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 	type fields struct {
 		threshold                uint64
-		failureCount             uint64
 		state                    state
 		halfOpenTimeout          time.Duration
 		failureCountResetTimeout time.Duration
@@ -37,9 +36,11 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 		{
 			name: "Close時に引数の関数が失敗した場合failureCountがincrementされる。",
 			fields: fields{
-				threshold:                5,
-				failureCount:             0,
-				state:                    Closed,
+				threshold: 5,
+				state: &stateClosed{
+					failureCount: 0,
+					threshold:    5,
+				},
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -48,9 +49,11 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 			},
 			wantErr: true,
 			want: CircuitBreakerImpl{
-				threshold:                5,
-				failureCount:             1,
-				state:                    Closed,
+				threshold: 5,
+				state: &stateClosed{
+					failureCount: 1,
+					threshold:    5,
+				},
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -58,9 +61,11 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 		{
 			name: "関数の実行後にfailureCountがthresholdと同じ場合stateがOpenになる",
 			fields: fields{
-				threshold:                5,
-				failureCount:             4,
-				state:                    Closed,
+				threshold: 5,
+				state: &stateClosed{
+					failureCount: 4,
+					threshold:    5,
+				},
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -70,8 +75,7 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 			wantErr: true,
 			want: CircuitBreakerImpl{
 				threshold:                5,
-				failureCount:             5,
-				state:                    Open,
+				state:                    open,
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -79,30 +83,21 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 		{
 			name: "Openだった場合関数は必ず失敗する",
 			fields: fields{
-				threshold:                5,
-				failureCount:             5,
-				state:                    Open,
-				halfOpenTimeout:          time.Hour,
-				failureCountResetTimeout: time.Hour,
+				state: open,
 			},
 			args: args{
 				f: SuccessFunc,
 			},
 			wantErr: true,
 			want: CircuitBreakerImpl{
-				threshold:                5,
-				failureCount:             5,
-				state:                    Open,
-				halfOpenTimeout:          time.Hour,
-				failureCountResetTimeout: time.Hour,
+				state: open,
 			},
 		},
 		{
 			name: "HalfOpen時に引数の関数が成功した場合Closeになり、failureCountがリセットされる",
 			fields: fields{
 				threshold:                5,
-				failureCount:             5,
-				state:                    HalfOpen,
+				state:                    halfOpen,
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -112,18 +107,16 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 			wantErr: false,
 			want: CircuitBreakerImpl{
 				threshold:                5,
-				failureCount:             0,
-				state:                    Closed,
+				state:                    closed(5),
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
 		},
 		{
-			name: "HalfOpen時に引数の関数が失敗した場合Closeになる",
+			name: "HalfOpen時に引数の関数が失敗した場合Openになる",
 			fields: fields{
 				threshold:                5,
-				failureCount:             5,
-				state:                    HalfOpen,
+				state:                    halfOpen,
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -133,8 +126,7 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 			wantErr: true,
 			want: CircuitBreakerImpl{
 				threshold:                5,
-				failureCount:             5,
-				state:                    Open,
+				state:                    open,
 				halfOpenTimeout:          time.Hour,
 				failureCountResetTimeout: time.Hour,
 			},
@@ -147,7 +139,6 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 
 			c := &CircuitBreakerImpl{
 				threshold:                tt.fields.threshold,
-				failureCount:             tt.fields.failureCount,
 				state:                    tt.fields.state,
 				stateMutationMutex:       mutex,
 				halfOpenTimeout:          tt.fields.halfOpenTimeout,
@@ -159,8 +150,8 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 				t.Errorf("InvokeFunc() error = %v, wantErr %v", err, tt.wantErr)
 			}
 
-			if tt.want != *c {
-				t.Errorf("unexpected circuit_breaker actual = %#v want = %#v", *c, tt.want)
+			if tt.want.View() != c.View() {
+				t.Errorf("unexpected circuit_breaker actual = %#v want = %#v", c.View(), tt.want.View())
 			}
 		})
 	}
@@ -169,7 +160,6 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 func TestCircuitBreakerImpl_Open(t *testing.T) {
 	type fields struct {
 		threshold                uint64
-		failureCount             uint64
 		state                    state
 		halfOpenTimeout          time.Duration
 		failureCountResetTimeout time.Duration
@@ -183,26 +173,28 @@ func TestCircuitBreakerImpl_Open(t *testing.T) {
 		{
 			name: "Open後halfOpenTimeout分経過し、未だOpenだった場合HalfOpenになる",
 			fields: fields{
-				state:           Closed,
+				state:           closed(1),
 				halfOpenTimeout: time.Second,
 			},
 			want: CircuitBreakerImpl{
-				state:           HalfOpen,
+				state:           halfOpen,
 				halfOpenTimeout: time.Second,
 			},
 		},
 		{
 			name: "Open後halfOpenTimeout分経過し、すでにCloseだった場合なにもおきない",
 			fields: fields{
-				state:           Closed,
+				threshold:       1,
+				state:           closed(1),
 				halfOpenTimeout: time.Second,
 			},
 			want: CircuitBreakerImpl{
-				state:           Closed,
+				threshold:       1,
+				state:           closed(1),
 				halfOpenTimeout: time.Second,
 			},
 			interception: func(impl *CircuitBreakerImpl) {
-				impl.state = Closed
+				impl.state = closed(1)
 			},
 		},
 	}
@@ -211,7 +203,6 @@ func TestCircuitBreakerImpl_Open(t *testing.T) {
 			var mutex = &sync.Mutex{}
 			c := &CircuitBreakerImpl{
 				threshold:                tt.fields.threshold,
-				failureCount:             tt.fields.failureCount,
 				state:                    tt.fields.state,
 				stateMutationMutex:       mutex,
 				halfOpenTimeout:          tt.fields.halfOpenTimeout,
@@ -224,8 +215,8 @@ func TestCircuitBreakerImpl_Open(t *testing.T) {
 				tt.interception(c)
 			}
 			time.Sleep(c.halfOpenTimeout + time.Second)
-			if tt.want != *c {
-				t.Errorf("unexpected circuit_breaker actual = %#v want = %#v", *c, tt.want)
+			if tt.want.View() != c.View() {
+				t.Errorf("unexpected circuit_breaker actual = %#v want = %#v", c.View(), tt.want.View())
 			}
 		})
 	}

@@ -19,10 +19,12 @@ type (
 
 	stateOpen     struct{}
 	stateHalfOpen struct{}
-	stateClosed   struct{}
+	stateClosed   struct {
+		failureCount uint64
+		threshold    uint64
+	}
 
 	CircuitBreaker interface {
-		FailureCount() uint64
 		FailureCountResetTimeout() time.Duration
 		InvokeFunc(func() error) error
 		View() CircuitBreakerView
@@ -30,17 +32,11 @@ type (
 
 	innerCircuitBreaker interface {
 		CircuitBreaker
-		IsThresholdExceeded() bool
-		IsOpen() bool
-		IsClosed() bool
 		Open()
-		IncrementFailureCount()
-		DecrementFailureCount()
 	}
 
 	CircuitBreakerImpl struct {
 		threshold          uint64
-		failureCount       uint64
 		state              state
 		stateMutationMutex *sync.Mutex
 
@@ -52,7 +48,6 @@ type (
 
 	CircuitBreakerView struct {
 		Threshold                uint64        `json:"threshold"`
-		FailureCount             uint64        `json:"failure_count"`
 		State                    string        `json:"state"`
 		HalfOpenTimeout          time.Duration `json:"half_open_timeout"`
 		FailureCountResetTimeout time.Duration `json:"failure_count_reset_timeout"`
@@ -72,7 +67,6 @@ var (
 func (c *CircuitBreakerImpl) View() CircuitBreakerView {
 	return CircuitBreakerView{
 		Threshold:                c.threshold,
-		FailureCount:             c.failureCount,
 		State:                    c.state.String(),
 		HalfOpenTimeout:          c.halfOpenTimeout,
 		FailureCountResetTimeout: c.failureCountResetTimeout,
@@ -91,15 +85,15 @@ func (s stateOpen) GoString() string {
 }
 
 func (s stateClosed) String() string {
-	return "Closed"
+	return fmt.Sprintf("closed: {failureCount: %d, threshold: %d}", s.failureCount, s.threshold)
 }
 
 func (s stateHalfOpen) String() string {
-	return "HalfOpen"
+	return "halfOpen"
 }
 
 func (s stateOpen) String() string {
-	return "Open"
+	return "open"
 }
 
 var ErrCircuitBreakerOpen = xerrors.New("circuit breaker is open. canceled invoke function")
@@ -112,34 +106,51 @@ func NewCircuitBreaker(
 	failureCountResetTimeout time.Duration,
 	options ...option,
 ) CircuitBreaker {
-	return &CircuitBreakerImpl{
+	impl := &CircuitBreakerImpl{
 		threshold:                threshold,
-		failureCount:             0,
-		state:                    Closed,
+		state:                    closed(threshold),
 		stateMutationMutex:       &sync.Mutex{},
 		halfOpenTimeout:          halfOpenTimeout,
 		failureCountResetTimeout: failureCountResetTimeout,
 	}
+
+	for _, apply := range options {
+		apply(impl)
+	}
+
+	return impl
 }
 
 var (
-	Open     = stateOpen{}
-	HalfOpen = stateHalfOpen{}
-	Closed   = stateClosed{}
+	open     = stateOpen{}
+	halfOpen = stateHalfOpen{}
 )
 
-func (s stateClosed) Failed(breaker innerCircuitBreaker) {
-	breaker.IncrementFailureCount()
-	if breaker.IsThresholdExceeded() {
+func closed(threshold uint64) *stateClosed {
+	return &stateClosed{
+		failureCount: 0,
+		threshold:    threshold,
+	}
+}
+
+func (s *stateClosed) Failed(breaker innerCircuitBreaker) {
+	s.IncrementFailureCount()
+	if s.IsThresholdExceeded() {
 		breaker.Open()
 	}
 
 	go func() {
 		time.Sleep(breaker.FailureCountResetTimeout())
-		if breaker.IsClosed() {
-			breaker.DecrementFailureCount()
-		}
+		s.DecrementFailureCount()
 	}()
+}
+
+func (s *stateClosed) IncrementFailureCount() {
+	atomic.AddUint64(&s.failureCount, 1)
+}
+
+func (s *stateClosed) DecrementFailureCount() {
+	atomic.AddUint64(&s.failureCount, ^uint64(0))
 }
 
 func (s stateHalfOpen) Failed(breaker innerCircuitBreaker) {
@@ -157,7 +168,7 @@ func (c *CircuitBreakerImpl) log(format string, args ...interface{}) {
 }
 
 func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {
-	if c.IsOpen() {
+	if c.isOpen() {
 		return ErrCircuitBreakerOpen
 	}
 	result := f()
@@ -169,34 +180,22 @@ func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {
 	return nil
 }
 
-func (c *CircuitBreakerImpl) IncrementFailureCount() {
-	atomic.AddUint64(&c.failureCount, 1)
-}
-
-func (c *CircuitBreakerImpl) DecrementFailureCount() {
-	atomic.AddUint64(&c.failureCount, ^uint64(0))
-}
-
-func (c *CircuitBreakerImpl) resetFailureCount() {
-	_ = atomic.SwapUint64(&c.failureCount, 0)
-}
-
 func (c *CircuitBreakerImpl) NotifyFailure() {
 	c.state.Failed(c)
 }
 
 func (c *CircuitBreakerImpl) NotifySuccess() {
-	if c.IsHalfOpen() {
+	if c.isHalfOpen() {
 		c.Close()
 	}
 }
 
-func (c *CircuitBreakerImpl) IsThresholdExceeded() bool {
-	return c.FailureCount() >= c.threshold
+func (s *stateClosed) IsThresholdExceeded() bool {
+	return s.FailureCount() >= s.threshold
 }
 
-func (c *CircuitBreakerImpl) FailureCount() uint64 {
-	return atomic.LoadUint64(&c.failureCount)
+func (s *stateClosed) FailureCount() uint64 {
+	return atomic.LoadUint64(&s.failureCount)
 }
 
 func (c *CircuitBreakerImpl) FailureCountResetTimeout() time.Duration {
@@ -210,32 +209,27 @@ func (c *CircuitBreakerImpl) mutateState(state state) {
 }
 
 func (c *CircuitBreakerImpl) Open() {
-	c.mutateState(Open)
+	c.mutateState(open)
 	go func() {
 		time.Sleep(c.halfOpenTimeout)
-		if c.IsOpen() {
+		if c.isOpen() {
 			c.HalfOpen()
 		}
 	}()
 }
 
 func (c *CircuitBreakerImpl) HalfOpen() {
-	c.mutateState(HalfOpen)
+	c.mutateState(halfOpen)
 }
 
 func (c *CircuitBreakerImpl) Close() {
-	c.mutateState(Closed)
-	c.resetFailureCount()
+	c.mutateState(closed(c.threshold))
 }
 
-func (c *CircuitBreakerImpl) IsOpen() bool {
-	return c.state == Open
+func (c *CircuitBreakerImpl) isOpen() bool {
+	return c.state == open
 }
 
-func (c *CircuitBreakerImpl) IsHalfOpen() bool {
-	return c.state == HalfOpen
-}
-
-func (c *CircuitBreakerImpl) IsClosed() bool {
-	return c.state == Closed
+func (c *CircuitBreakerImpl) isHalfOpen() bool {
+	return c.state == halfOpen
 }

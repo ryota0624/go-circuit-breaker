@@ -12,7 +12,7 @@ import (
 
 type (
 	state interface {
-		OnFailed(breaker innerCircuitBreaker)
+		onFailed(breaker innerCircuitBreaker)
 		fmt.Stringer
 		fmt.GoStringer
 	}
@@ -30,6 +30,10 @@ type (
 		InvokeFunc(func() error) error
 		View() CircuitBreakerView
 		IsOpen() bool
+	}
+
+	IgnoreError struct {
+		err error
 	}
 
 	innerCircuitBreaker interface {
@@ -57,6 +61,23 @@ type (
 
 	option func(i *CircuitBreakerImpl)
 )
+
+func isIgnoreError(err error) bool {
+	_, ok := err.(*IgnoreError)
+	return ok
+}
+
+func NewIgnoreError(err error) *IgnoreError {
+	return &IgnoreError{err: err}
+}
+
+func (e *IgnoreError) Error() string {
+	return fmt.Sprintf("circuit_breaker ignore error: %s", e.err.Error())
+}
+
+func (e *IgnoreError) Unwrap() error {
+	return e.err
+}
 
 var (
 	SetLogger = func(logger io.StringWriter) option {
@@ -135,7 +156,7 @@ func closed(threshold uint64) *stateClosed {
 	}
 }
 
-func (s *stateClosed) OnFailed(breaker innerCircuitBreaker) {
+func (s *stateClosed) onFailed(breaker innerCircuitBreaker) {
 	s.IncrementFailureCount()
 	if s.IsThresholdExceeded() {
 		breaker.Open()
@@ -155,11 +176,11 @@ func (s *stateClosed) DecrementFailureCount() {
 	atomic.AddUint64(&s.failureCount, ^uint64(0))
 }
 
-func (s stateHalfOpen) OnFailed(breaker innerCircuitBreaker) {
+func (s stateHalfOpen) onFailed(breaker innerCircuitBreaker) {
 	breaker.Open()
 }
 
-func (s stateOpen) OnFailed(breaker innerCircuitBreaker) {
+func (s stateOpen) onFailed(breaker innerCircuitBreaker) {
 	// DO NOT Nothing. if this method was called, the Circuit Breaker has a bug
 }
 
@@ -173,17 +194,17 @@ func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {
 	if c.IsOpen() {
 		return ErrCircuitBreakerOpen
 	}
-	result := f()
-	if result != nil {
+	err := f()
+	if err != nil && !isIgnoreError(err) {
 		c.NotifyFailure()
-		return result
+		return err
 	}
 	c.NotifySuccess()
 	return nil
 }
 
 func (c *CircuitBreakerImpl) NotifyFailure() {
-	c.state.OnFailed(c)
+	c.state.onFailed(c)
 }
 
 func (c *CircuitBreakerImpl) NotifySuccess() {

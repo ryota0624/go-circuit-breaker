@@ -2,6 +2,7 @@ package circuit_breaker
 
 import (
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,6 +46,8 @@ type (
 
 		halfOpenTimeout          time.Duration
 		failureCountResetTimeout time.Duration
+
+		logWriter io.StringWriter
 	}
 
 	CircuitBreakerView struct {
@@ -53,6 +56,16 @@ type (
 		State                    string        `json:"state"`
 		HalfOpenTimeout          time.Duration `json:"half_open_timeout"`
 		FailureCountResetTimeout time.Duration `json:"failure_count_reset_timeout"`
+	}
+
+	option func(i *CircuitBreakerImpl)
+)
+
+var (
+	SetLogger = func(logger io.StringWriter) option {
+		return func(i *CircuitBreakerImpl) {
+			i.logWriter = logger
+		}
 	}
 )
 
@@ -97,6 +110,7 @@ func NewCircuitBreaker(
 	threshold uint64,
 	halfOpenTimeout time.Duration,
 	failureCountResetTimeout time.Duration,
+	options ...option,
 ) CircuitBreaker {
 	return &CircuitBreakerImpl{
 		threshold:                threshold,
@@ -134,6 +148,12 @@ func (s stateHalfOpen) Failed(breaker innerCircuitBreaker) {
 
 func (s stateOpen) Failed(breaker innerCircuitBreaker) {
 	// DO NOT Nothing. if this method was called, the Circuit Breaker has a bug
+}
+
+func (c *CircuitBreakerImpl) log(format string, args ...interface{}) {
+	if c.logWriter != nil {
+		_, _ = c.logWriter.WriteString(fmt.Sprintf(format, args...))
+	}
 }
 
 func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {

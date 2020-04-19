@@ -1,15 +1,19 @@
 package circuit_breaker
 
 import (
-	"golang.org/x/xerrors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/xerrors"
 )
 
 type (
 	state interface {
 		Failed(breaker innerCircuitBreaker)
+		fmt.Stringer
+		fmt.GoStringer
 	}
 
 	stateOpen     struct{}
@@ -20,6 +24,7 @@ type (
 		FailureCount() uint64
 		FailureCountResetTimeout() time.Duration
 		InvokeFunc(func() error) error
+		View() CircuitBreakerView
 	}
 
 	innerCircuitBreaker interface {
@@ -41,7 +46,48 @@ type (
 		halfOpenTimeout          time.Duration
 		failureCountResetTimeout time.Duration
 	}
+
+	CircuitBreakerView struct {
+		Threshold                uint64        `json:"threshold"`
+		FailureCount             uint64        `json:"failure_count"`
+		State                    string        `json:"state"`
+		HalfOpenTimeout          time.Duration `json:"half_open_timeout"`
+		FailureCountResetTimeout time.Duration `json:"failure_count_reset_timeout"`
+	}
 )
+
+func (c *CircuitBreakerImpl) View() CircuitBreakerView {
+	return CircuitBreakerView{
+		Threshold:                c.threshold,
+		FailureCount:             c.failureCount,
+		State:                    c.state.String(),
+		HalfOpenTimeout:          c.halfOpenTimeout,
+		FailureCountResetTimeout: c.failureCountResetTimeout,
+	}
+}
+func (s stateClosed) GoString() string {
+	return s.String()
+}
+
+func (s stateHalfOpen) GoString() string {
+	return s.String()
+}
+
+func (s stateOpen) GoString() string {
+	return s.String()
+}
+
+func (s stateClosed) String() string {
+	return "Closed"
+}
+
+func (s stateHalfOpen) String() string {
+	return "HalfOpen"
+}
+
+func (s stateOpen) String() string {
+	return "Open"
+}
 
 var ErrCircuitBreakerOpen = xerrors.New("circuit breaker is open. canceled invoke function")
 
@@ -108,7 +154,7 @@ func (c *CircuitBreakerImpl) IncrementFailureCount() {
 }
 
 func (c *CircuitBreakerImpl) DecrementFailureCount() {
-	atomic.AddUint64(&c.failureCount, ^0)
+	atomic.AddUint64(&c.failureCount, ^uint64(0))
 }
 
 func (c *CircuitBreakerImpl) resetFailureCount() {

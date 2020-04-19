@@ -45,6 +45,8 @@ type (
 
 var ErrCircuitBreakerOpen = xerrors.New("circuit breaker is open. canceled invoke function")
 
+var _ CircuitBreaker = (*CircuitBreakerImpl)(nil)
+
 func NewCircuitBreaker(
 	threshold uint64,
 	halfOpenTimeout time.Duration,

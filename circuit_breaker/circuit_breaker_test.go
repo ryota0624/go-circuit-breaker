@@ -8,6 +8,21 @@ import (
 	"golang.org/x/xerrors"
 )
 
+type (
+	TestingLogger struct {
+		t *testing.T
+	}
+)
+
+func NewTestingLogger(t *testing.T) *TestingLogger {
+	return &TestingLogger{t: t}
+}
+
+func (t TestingLogger) WriteString(s string) (n int, err error) {
+	t.t.Logf(s)
+	return 0, nil
+}
+
 func FailFunc() error {
 	return xerrors.New("fail")
 }
@@ -143,6 +158,7 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 				stateMutationMutex:       mutex,
 				halfOpenTimeout:          tt.fields.halfOpenTimeout,
 				failureCountResetTimeout: tt.fields.failureCountResetTimeout,
+				logWriter:                NewTestingLogger(t),
 			}
 
 			tt.want.stateMutationMutex = mutex
@@ -154,6 +170,73 @@ func TestCircuitBreakerImpl_InvokeFunc(t *testing.T) {
 				t.Errorf("unexpected circuit_breaker actual = %#v want = %#v", c.View(), tt.want.View())
 			}
 		})
+	}
+}
+
+func TestCircuitBreaker_InvokeFunc_Scenario(t *testing.T) {
+	circuitBreaker := NewCircuitBreaker(3, time.Second*3, time.Second, SetLogger(NewTestingLogger(t)))
+
+	invokeUntilOpen := func() {
+		_ = circuitBreaker.InvokeFunc(FailFunc)
+		_ = circuitBreaker.InvokeFunc(FailFunc)
+		_ = circuitBreaker.InvokeFunc(FailFunc)
+		if !circuitBreaker.IsOpen() {
+			t.Errorf("unexpected state. IsOpen() should return true.  %#v", circuitBreaker)
+			return
+		}
+	}
+
+	_ = circuitBreaker.InvokeFunc(SuccessFunc)
+	_ = circuitBreaker.InvokeFunc(SuccessFunc)
+	_ = circuitBreaker.InvokeFunc(SuccessFunc)
+	_ = circuitBreaker.InvokeFunc(SuccessFunc)
+	if circuitBreaker.IsOpen() {
+		t.Errorf("unexpected state. IsOpen() should return false. %#v", circuitBreaker)
+		return
+	}
+
+	invokeUntilOpen()
+
+	time.Sleep(circuitBreaker.HalfOpenTimeout() + time.Second)
+	_ = circuitBreaker.InvokeFunc(SuccessFunc)
+	if circuitBreaker.IsOpen() {
+		t.Errorf("unexpected state. IsOpen() should return false. %#v", circuitBreaker)
+		return
+	}
+	invokeUntilOpen()
+
+	time.Sleep(circuitBreaker.HalfOpenTimeout() + time.Second)
+	_ = circuitBreaker.InvokeFunc(FailFunc)
+	if !circuitBreaker.IsOpen() {
+		t.Errorf("unexpected state. IsOpen() should return true.  %#v", circuitBreaker)
+		return
+	}
+
+	err := circuitBreaker.InvokeFunc(FailFunc)
+
+	if !xerrors.Is(err, ErrCircuitBreakerOpen) {
+		t.Errorf("unexpected error occurred. %+v", err)
+		return
+	}
+
+}
+
+func TestCircuitBreaker_InvokeFunc_Parallel(t *testing.T) {
+	threshold := uint64(5)
+	circuitBreaker := NewCircuitBreaker(threshold, time.Second*3, time.Second, SetLogger(NewTestingLogger(t)))
+	wg := &sync.WaitGroup{}
+	for range make([]int, threshold) {
+		wg.Add(1)
+		go func() {
+			_ = circuitBreaker.InvokeFunc(FailFunc)
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+	if !circuitBreaker.IsOpen() {
+		t.Errorf("unexpected state. IsOpen() should return true.  %#v", circuitBreaker)
+		return
 	}
 }
 
@@ -207,6 +290,7 @@ func TestCircuitBreakerImpl_Open(t *testing.T) {
 				stateMutationMutex:       mutex,
 				halfOpenTimeout:          tt.fields.halfOpenTimeout,
 				failureCountResetTimeout: tt.fields.failureCountResetTimeout,
+				logWriter:                NewTestingLogger(t),
 			}
 
 			c.Open()

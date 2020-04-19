@@ -12,7 +12,7 @@ import (
 
 type (
 	state interface {
-		Failed(breaker innerCircuitBreaker)
+		OnFailed(breaker innerCircuitBreaker)
 		fmt.Stringer
 		fmt.GoStringer
 	}
@@ -26,8 +26,10 @@ type (
 
 	CircuitBreaker interface {
 		FailureCountResetTimeout() time.Duration
+		HalfOpenTimeout() time.Duration
 		InvokeFunc(func() error) error
 		View() CircuitBreakerView
+		IsOpen() bool
 	}
 
 	innerCircuitBreaker interface {
@@ -133,7 +135,7 @@ func closed(threshold uint64) *stateClosed {
 	}
 }
 
-func (s *stateClosed) Failed(breaker innerCircuitBreaker) {
+func (s *stateClosed) OnFailed(breaker innerCircuitBreaker) {
 	s.IncrementFailureCount()
 	if s.IsThresholdExceeded() {
 		breaker.Open()
@@ -153,11 +155,11 @@ func (s *stateClosed) DecrementFailureCount() {
 	atomic.AddUint64(&s.failureCount, ^uint64(0))
 }
 
-func (s stateHalfOpen) Failed(breaker innerCircuitBreaker) {
+func (s stateHalfOpen) OnFailed(breaker innerCircuitBreaker) {
 	breaker.Open()
 }
 
-func (s stateOpen) Failed(breaker innerCircuitBreaker) {
+func (s stateOpen) OnFailed(breaker innerCircuitBreaker) {
 	// DO NOT Nothing. if this method was called, the Circuit Breaker has a bug
 }
 
@@ -168,7 +170,7 @@ func (c *CircuitBreakerImpl) log(format string, args ...interface{}) {
 }
 
 func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {
-	if c.isOpen() {
+	if c.IsOpen() {
 		return ErrCircuitBreakerOpen
 	}
 	result := f()
@@ -181,11 +183,12 @@ func (c *CircuitBreakerImpl) InvokeFunc(f func() error) error {
 }
 
 func (c *CircuitBreakerImpl) NotifyFailure() {
-	c.state.Failed(c)
+	c.state.OnFailed(c)
 }
 
 func (c *CircuitBreakerImpl) NotifySuccess() {
 	if c.isHalfOpen() {
+		c.log("invoke func succeeded. \n")
 		c.Close()
 	}
 }
@@ -198,11 +201,16 @@ func (s *stateClosed) FailureCount() uint64 {
 	return atomic.LoadUint64(&s.failureCount)
 }
 
+func (c *CircuitBreakerImpl) HalfOpenTimeout() time.Duration {
+	return c.halfOpenTimeout
+}
+
 func (c *CircuitBreakerImpl) FailureCountResetTimeout() time.Duration {
 	return c.failureCountResetTimeout
 }
 
 func (c *CircuitBreakerImpl) mutateState(state state) {
+	c.log("state transition %#v -> %#v\n", c.state, state)
 	c.stateMutationMutex.Lock()
 	defer c.stateMutationMutex.Unlock()
 	c.state = state
@@ -212,7 +220,8 @@ func (c *CircuitBreakerImpl) Open() {
 	c.mutateState(open)
 	go func() {
 		time.Sleep(c.halfOpenTimeout)
-		if c.isOpen() {
+		if c.IsOpen() {
+			c.log("halfOpenTimeout exceeded.\n")
 			c.HalfOpen()
 		}
 	}()
@@ -226,7 +235,7 @@ func (c *CircuitBreakerImpl) Close() {
 	c.mutateState(closed(c.threshold))
 }
 
-func (c *CircuitBreakerImpl) isOpen() bool {
+func (c *CircuitBreakerImpl) IsOpen() bool {
 	return c.state == open
 }
 
